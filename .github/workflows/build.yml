@@ -57,6 +57,9 @@ jobs:
           # Workaround for the FUCKING anti-virus software, many of which even detect an exe which does nothing
           # but is just written in rust and compiled by nightly toolchain with `-Ctarget-feature=+crt-static`!
           # Even compiled with stable toolchain, such an exe is detected as virus by some anti-virus software.
+          Env:CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO = ""; Remove-Item Env:CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO
+          Env:CARGO_PROFILE_RELEASE_DEBUG = ""; Remove-Item Env:CARGO_PROFILE_RELEASE_DEBUG
+          Env:CARGO_PROFILE_RELEASE_STRIP = ""; Remove-Item Env:CARGO_PROFILE_RELEASE_STRIP
           rustup +nightly-2022-04-22 target add i686-pc-windows-msvc
           cargo +nightly-2022-04-22 build --profile ${{env.PROFILE}} --target i686-pc-windows-msvc
           cd ..
