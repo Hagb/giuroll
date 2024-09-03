@@ -1,5 +1,7 @@
 # Giuroll  
 
+**This forked version has been moved to https://github.com/hagb/giuroll-hagb.**
+
 Is a network rollback mod for 東方非想天則 / Touhou 12.3 Hisoutensoku, which aims to significantly improve the responsiveness of netplay, as well as introducing other rollback related improvements to replay mode.  
 
 Currently this is an early version, and might slightly increase instability, but will still significantly improve the netplay experience for almost all connections.  
