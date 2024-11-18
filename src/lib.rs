@@ -1,11 +1,10 @@
-#![feature(pointer_is_aligned)]
-#![feature(abi_thiscall)]
 #![feature(let_chains)]
 #![feature(coroutines)]
 #![feature(iter_from_coroutine)]
 #![feature(anonymous_lifetime_in_impl_trait)]
 #![feature(panic_update_hook)]
 #![feature(panic_info_message)]
+#![feature(stmt_expr_attributes)]
 // we should manually and carefully avoid undefined behavior about
 // references to and any borrowing of static mut variables.
 // shuold be solved before updating to 2024 edition?
@@ -17,7 +16,7 @@ use std::panic;
 use std::{
     any::type_name,
     collections::HashMap,
-    ffi::{c_void, OsStr},
+    ffi::{c_void},
     mem::align_of,
     os::windows::prelude::OsStringExt,
     path::{Path, PathBuf},
@@ -39,7 +38,6 @@ use ilhook::x86::{HookPoint, HookType};
 #[cfg(feature = "logtofile")]
 use log::info;
 use mininip::datas::{Identifier, Value};
-use mininip::errors::ParseFileError;
 use netcode::{Netcoder, NetworkPacket};
 
 //use notify::{RecursiveMode, Watcher};
@@ -48,7 +46,7 @@ use sound::RollbackSoundManager;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
-use windows::Win32::System::Memory::HEAP_FLAGS;
+use windows::Win32::System::Memory::{HEAP_FLAGS};
 use windows::Win32::{
     Foundation::{GetLastError, HMODULE, HWND},
     Networking::WinSock::{closesocket, SOCKADDR, SOCKET},
@@ -233,16 +231,15 @@ pub unsafe extern "C" fn addRollbackCb(cb: *const Callbacks) {
 
 #[no_mangle]
 pub extern "C" fn InitializeByLoader(dllmodule: HMODULE) -> bool {
-    Initialize_(dllmodule, true)
+    initialize(dllmodule, true)
 }
 
 #[no_mangle]
 pub extern "C" fn Initialize(dllmodule: HMODULE) -> bool {
-    Initialize_(dllmodule, false)
+    initialize(dllmodule, false)
 }
 
-#[no_mangle]
-fn Initialize_(dllmodule: HMODULE, pretend_to_be_vanilla: bool) -> bool {
+fn initialize(dllmodule: HMODULE, pretend_to_be_vanilla: bool) -> bool {
     let mut dat = [0u16; 1025];
     unsafe { GetModuleFileNameW(dllmodule, &mut dat) };
 
@@ -286,14 +283,17 @@ pub extern "cdecl" fn CheckVersion(a: *const [u8; 16]) -> bool {
     unsafe { *ptr_wrap!(a) == HASH110A }
 }
 
-static mut REAL_INPUT: Option<[bool; 10]> = None;
-static mut REAL_INPUT2: Option<[bool; 10]> = None;
+const INPUT_KEYS_NUMBERS: usize = 12;
+
+static mut REAL_INPUT: Option<[bool; INPUT_KEYS_NUMBERS]> = None;
+static mut REAL_INPUT2: Option<[bool; INPUT_KEYS_NUMBERS]> = None;
 
 static mut UPDATE: Option<SystemTime> = None;
 static mut TARGET: Option<u128> = None;
 
 static mut WARNING_FRAME_MISSING_1_COUNTDOWN: usize = 0;
 static mut WARNING_FRAME_MISSING_2_COUNTDOWN: usize = 0;
+static mut WARNING_FRAME_LOST_COUNTDOWN: AtomicU32 = AtomicU32::new(0);
 static SOKU_LOOP_EVENT: Mutex<Option<isize>> = Mutex::new(None);
 static TARGET_OFFSET: AtomicI32 = AtomicI32::new(0);
 //static TARGET_OFFSET_COUNT: AtomicI32 = AtomicI32::new(0);
@@ -560,6 +560,7 @@ impl CameraTransform {
 }
 
 static mut CAMERA_ACTUAL_SMOOTH_TRANSFORM: Option<CameraTransform> = None;
+static mut LAST_IDEAL_CAMERA: Option<CameraTransform> = None;
 static mut LAST_CAMERA_BEFORE_SMOOTH: Option<CameraTransform> = None;
 static mut SMOOTH_ENABLED_CONFIG: bool = true;
 static mut SMOOTH_INCREASING_SCALE_CORRECTION: Option<f32> = None;
@@ -844,7 +845,7 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
     if f62_enabled {
         verstr += " CN";
     }
-    let mut title = read_ini_string(
+    let title = read_ini_string(
         &conf,
         "Misc",
         "game_title",
@@ -937,10 +938,47 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
         }
     }
 
+    unsafe {
+        // ChainCFix, figured out by Dylan, Hagb and PinkySmile and originally implemented by PinkySmile.
+        // https://github.com/SokuDev/ChainCFix
+        unsafe extern "thiscall" fn my_object_handler_spawn_bullet(
+            player: usize,
+            action: i32,
+            x: f32,
+            y: f32,
+            dir: i32,
+            color: u32,
+            data: *mut f32,
+            size: usize,
+        ) {
+            let origin: unsafe extern "thiscall" fn(_, _, _, _, _, _, _, _) =
+                std::mem::transmute(0x46eb30);
+            // from SokuLib
+            let soku_operator_new: unsafe extern "cdecl" fn(usize) -> *mut u8 =
+                std::mem::transmute(0x0081FBDC);
+            let soku_operator_delete: unsafe extern "cdecl" fn(*mut u8) =
+                std::mem::transmute(0x0081F6FA);
+            let new_size = size + 1;
+            let new_data = soku_operator_new((new_size) * std::mem::size_of::<f32>()) as *mut f32;
+            new_data.copy_from(data, size);
+            *new_data.offset((new_size - 1) as isize) = 1.0;
+            origin(player, action, x, y, dir, color, new_data, new_size);
+            soku_operator_delete(new_data as _);
+        }
+        for a in [0x590486, 0x590C4C, 0x590683, 0x5906ED] as [usize; 4] {
+            tamper_jmp_relative_opr(
+                a as *mut c_void,
+                my_object_handler_spawn_bullet
+                    as unsafe extern "thiscall" fn(_, _, _, _, _, _, _, _),
+            );
+        }
+    }
+
     let new =
         unsafe { ilhook::x86::Hooker::new(0x482701, HookType::JmpBack(main_hook), 0).hook(6) };
     std::mem::forget(new);
 
+    let handle_sound_real_ret = vec![0x401d58, 0x401db7];
     //0x899d60 maybe sound manager?
     unsafe extern "cdecl" fn handle_sound_real(
         a: *mut ilhook::x86::Registers,
@@ -956,11 +994,11 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
         let soundid = (*a).eax as usize;
 
         if DISABLE_SOUND {
-            return 0x401db7;
+            return 1;
         }
 
         if !BATTLE_STARTED || soundid == 0 {
-            return if soundid == 0 { 0x401db7 } else { 0x401d58 };
+            return if soundid == 0 { 1 } else { 0 };
         }
 
         if let Some(manager) = SOUND_MANAGER.as_mut()
@@ -974,26 +1012,27 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
             //);
             if manager.insert_sound(*SOKU_FRAMECOUNT, soundid) {
                 //println!("sound {} accepted at frame {}", soundid, *SOKU_FRAMECOUNT);
-                0x401d58
+                0
             } else {
                 //println!("sound {} rejected at frame {} because it was already present", soundid, *SOKU_FRAMECOUNT);
-                0x401db7
+                1
             }
         } else {
-            0x401d58
+            0
         }
     }
 
     let new = unsafe {
         ilhook::x86::Hooker::new(
             0x401d50, // 0x482820, //0x482532, sokuroll <-
-            HookType::JmpToRet(handle_sound_real),
+            HookType::JmpToEnumRet(handle_sound_real_ret, handle_sound_real),
             0,
         )
         .hook(6)
     };
     std::mem::forget(new);
 
+    let soundskiphook1_ret = vec![0x401db6, 0x401d8c, 0x401d81];
     unsafe extern "cdecl" fn soundskiphook1(
         a: *mut ilhook::x86::Registers,
         _b: usize,
@@ -1013,16 +1052,16 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
 
             true_fun(ecx, eax /*, *(((*a).esp + 0x8)  as *const u32)*/);
 
-            0x401db6
+            0
         } else {
             //replicate the usual logic
 
             // Soku2 unaligned (can be triggered with the b bullet of Flandre):
             //if ((*ptr_wrap!(((*a).esp + 8) as *const usize)) & 1) == 0 {
             if ((((*a).esp + 8) as *const usize).read_unaligned() & 1) == 0 {
-                0x401d8c
+                1
             } else {
-                0x401d81
+                2
             }
         }
     }
@@ -1030,7 +1069,7 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
     let new = unsafe {
         ilhook::x86::Hooker::new(
             0x401d7a, // 0x482820, //0x482532, sokuroll <-
-            HookType::JmpToRet(soundskiphook1),
+            HookType::JmpToEnumRet(soundskiphook1_ret, soundskiphook1),
             0,
         )
         .hook(5)
@@ -1107,8 +1146,12 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
         MEMORY_LEAK = 0;
         LAST_M_LEN = 0;
         CAMERA_ACTUAL_SMOOTH_TRANSFORM = None;
+        LAST_IDEAL_CAMERA = None;
         LAST_CAMERA_BEFORE_SMOOTH = None;
         SMOOTH = false;
+
+        WARNING_FRAME_MISSING_1_COUNTDOWN = 0;
+        WARNING_FRAME_MISSING_2_COUNTDOWN = 0;
     }
 
     //no_ko_sound
@@ -1143,6 +1186,7 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
     let new = unsafe { ilhook::x86::Hooker::new(0x481960, HookType::JmpBack(on_exit), 0).hook(6) };
     std::mem::forget(new);
 
+    let spectator_skip_ret = vec![0x42daac, 0x42db21];
     unsafe extern "cdecl" fn spectator_skip(
         a: *mut ilhook::x86::Registers,
         _b: usize,
@@ -1163,7 +1207,7 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
             (*a).ebx = *ptr_wrap!(((*a).esi + 0x48) as *const u32);
             (*a).ecx = framecount_cur;
 
-            0x42daac
+            0
         } else {
             //println!("here 3");
             /*
@@ -1172,13 +1216,18 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
             // probably Soku2 unaligned
             // (*a).ebx = *ptr_wrap!(((*a).esp + 0x1c) as *const u32);
             (*a).ebx = (((*a).esp + 0x1c) as *const u32).read_unaligned();
-            0x42db21
+            1
         }
     }
 
     // changes the spectator logic to only send frame if there are at least 10 frames in the buffer. this prevent spectator from desyncing
     let new = unsafe {
-        ilhook::x86::Hooker::new(0x42daa6, HookType::JmpToRet(spectator_skip), 0).hook(6)
+        ilhook::x86::Hooker::new(
+            0x42daa6,
+            HookType::JmpToEnumRet(spectator_skip_ret, spectator_skip),
+            0,
+        )
+        .hook(6)
     };
     std::mem::forget(new);
 
@@ -1206,10 +1255,14 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
         transform_smoothly(camera);
     }
 
-    unsafe fn render_battle(
-        cbattle_render: unsafe extern "thiscall" fn(usize) -> usize,
+    unsafe fn cbattle_process_smooth(
+        cbattle_process: unsafe extern "thiscall" fn(usize) -> usize,
         cbattle: usize,
     ) -> usize {
+        if let Some(last_ideal) = LAST_IDEAL_CAMERA.take() {
+            last_ideal.restore_all();
+        }
+        let ret = cbattle_process(cbattle);
         if SMOOTH {
             let ideal = CameraTransform::dump();
             if let Some(mut last_smoothed) = CAMERA_ACTUAL_SMOOTH_TRANSFORM.take() {
@@ -1295,47 +1348,46 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
             // dump smoothed camera
             CAMERA_ACTUAL_SMOOTH_TRANSFORM = Some(CameraTransform::dump());
             LAST_SMOOTHED_FRAMECOUNT = *SOKU_FRAMECOUNT;
-            let ret = cbattle_render(cbattle);
-            ideal.restore_all();
-            return ret;
-        } else {
-            return cbattle_render(cbattle);
+            assert!(LAST_IDEAL_CAMERA.is_none());
+            LAST_IDEAL_CAMERA = Some(ideal);
         }
+        return ret;
     }
     unsafe {
-        static mut CBATTLE_RENDER: Option<unsafe extern "thiscall" fn(usize) -> usize> = None;
+        static mut CBATTLE_PROCESS: Option<unsafe extern "thiscall" fn(usize) -> usize> = None;
         unsafe extern "thiscall" fn cbattle_render(cbattle: usize) -> usize {
-            render_battle(CBATTLE_RENDER.unwrap(), cbattle)
+            cbattle_process_smooth(CBATTLE_PROCESS.unwrap(), cbattle)
         }
-        CBATTLE_RENDER = Some(tamper_memory(
-            0x008574a8 as _,
+        CBATTLE_PROCESS = Some(tamper_memory(
+            0x008574a4 as _,
             cbattle_render as unsafe extern "thiscall" fn(usize) -> usize,
         ));
 
-        static mut CBATTLECL_RENDER: Option<unsafe extern "thiscall" fn(usize) -> usize> = None;
+        static mut CBATTLECL_PROCESS: Option<unsafe extern "thiscall" fn(usize) -> usize> = None;
         unsafe extern "thiscall" fn cbattlecl_render(cbattle: usize) -> usize {
-            render_battle(CBATTLECL_RENDER.unwrap(), cbattle)
+            cbattle_process_smooth(CBATTLECL_PROCESS.unwrap(), cbattle)
         }
-        CBATTLECL_RENDER = Some(tamper_memory(
-            0x00857578 as _,
+        CBATTLECL_PROCESS = Some(tamper_memory(
+            0x00857574 as _,
             cbattlecl_render as unsafe extern "thiscall" fn(usize) -> usize,
         ));
 
-        static mut CBATTLESV_RENDER: Option<unsafe extern "thiscall" fn(usize) -> usize> = None;
+        static mut CBATTLESV_PROCESS: Option<unsafe extern "thiscall" fn(usize) -> usize> = None;
         unsafe extern "thiscall" fn cbattlesv_render(cbattle: usize) -> usize {
-            render_battle(CBATTLESV_RENDER.unwrap(), cbattle)
+            cbattle_process_smooth(CBATTLESV_PROCESS.unwrap(), cbattle)
         }
-        CBATTLESV_RENDER = Some(tamper_memory(
-            0x00857520 as _,
+        CBATTLESV_PROCESS = Some(tamper_memory(
+            0x0085751c as _,
             cbattlesv_render as unsafe extern "thiscall" fn(usize) -> usize,
         ));
 
-        static mut CBATTLE_WATCH_RENDER: Option<unsafe extern "thiscall" fn(usize) -> usize> = None;
+        static mut CBATTLE_WATCH_PROCESS: Option<unsafe extern "thiscall" fn(usize) -> usize> =
+            None;
         unsafe extern "thiscall" fn cbattle_watch_render(cbattle: usize) -> usize {
-            render_battle(CBATTLE_WATCH_RENDER.unwrap(), cbattle)
+            cbattle_process_smooth(CBATTLE_WATCH_PROCESS.unwrap(), cbattle)
         }
-        CBATTLE_WATCH_RENDER = Some(tamper_memory(
-            0x00857594 as _,
+        CBATTLE_WATCH_PROCESS = Some(tamper_memory(
+            0x00857590 as _,
             cbattle_watch_render as unsafe extern "thiscall" fn(usize) -> usize,
         ));
 
@@ -1347,13 +1399,11 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
         }
     }
 
-    static mut WARNING_FRAME_LOST_COUNTDOWN: AtomicU32 = AtomicU32::new(0);
     unsafe extern "cdecl" fn drawnumbers(_a: *mut ilhook::x86::Registers, _b: usize) {
         let d3d9_devic3 = 0x008A0E30 as *const *const IDirect3DDevice9;
         let yellow = D3DCOLOR_ARGB(0xff, 0xff, 0xff, 0);
         let red = D3DCOLOR_ARGB(0xff, 0xff, 0, 0);
 
-        WARNING_FRAME_MISSING_1_COUNTDOWN = WARNING_FRAME_MISSING_1_COUNTDOWN.saturating_sub(1);
         // (**d3d9_devic3).drawText
         if let Some(x) = NEXT_DRAW_PING {
             if WARNING_FRAME_MISSING_1_COUNTDOWN != 0
@@ -1371,7 +1421,6 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
             draw_num((300.0, 466.0), x);
         }
 
-        WARNING_FRAME_MISSING_2_COUNTDOWN = WARNING_FRAME_MISSING_2_COUNTDOWN.saturating_sub(1);
         if let Some(x) = NEXT_DRAW_ROLLBACK {
             if WARNING_FRAME_MISSING_2_COUNTDOWN != 0
                 && WARNING_WHEN_LAGGING
@@ -1397,7 +1446,6 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
         render_replay_progress_bar_and_numbers();
 
         if WARNING_FRAME_LOST_COUNTDOWN.load(Relaxed) != 0
-            && WARNING_FRAME_LOST_COUNTDOWN.fetch_sub(1, Relaxed) != 0
             && WARNING_WHEN_LAGGING
             && *(0x8998b2 as *const bool) /* whether display fps */
             && *SOKU_FRAMECOUNT >= 120
@@ -1612,13 +1660,13 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
         //        0046c902 8b ae 6c        MOV        EBP,dword ptr [ESI + 0x76c]
 
         (*a).ebp = *ptr_wrap!(((*a).esi + 0x76c) as *const u32);
-        let input_manager = (*a).ecx;
+        let input_manager = (*a).ecx as usize;
 
         let real_input = match std::mem::replace(&mut REAL_INPUT, REAL_INPUT2.take()) {
             Some(x) => x,
             None => {
                 IS_FIRST_READ_INPUTS = false;
-                let f = std::mem::transmute::<usize, extern "fastcall" fn(u32)>(0x040a370);
+                let f = std::mem::transmute::<usize, extern "fastcall" fn(usize)>(0x040a370);
                 (f)(input_manager);
                 return;
             }
@@ -1657,7 +1705,7 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
             }
         }
 
-        for a in 0..6 {
+        for a in 0..(INPUT_KEYS_NUMBERS - 4) {
             let v = &mut *ptr_wrap!((input_manager + 0x40 + a * 4) as *mut u32);
 
             if real_input[a as usize + 4] {
@@ -1669,7 +1717,7 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
 
         let m = &mut *ptr_wrap!((input_manager + 0x62) as *mut u16);
         *m = 0;
-        for a in 0..10 {
+        for a in 0..INPUT_KEYS_NUMBERS {
             if real_input[a] {
                 *m += 1 << a;
             }
@@ -1687,6 +1735,7 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
     };
     std::mem::forget(new);
 
+    let skiponcehost_ret = vec![0x428393, 0x428360, 0x428335];
     unsafe extern "cdecl" fn skiponcehost(
         a: *mut ilhook::x86::Registers,
         _b: usize,
@@ -1694,7 +1743,7 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
     ) -> usize {
         if ESC > 120 {
             //old mechanism
-            0x428393
+            0
         } else {
             //let skip = DISABLE_SEND.load(Relaxed) != 0;
             //DISABLE_SEND.store(1, Relaxed);
@@ -1702,11 +1751,11 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
             let skip = true;
 
             if skip {
-                0x428360
+                1
             } else {
                 (*a).ecx = *ptr_wrap!(((*a).edi + 0x8) as *const u32);
                 (*a).eax = *ptr_wrap!(((*a).ecx) as *const u32);
-                0x428335
+                2
             }
         }
     }
@@ -1722,10 +1771,17 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
     /*
     00481980 hm
      */
-    let new =
-        unsafe { ilhook::x86::Hooker::new(0x428330, HookType::JmpToRet(skiponcehost), 0).hook(5) };
+    let new = unsafe {
+        ilhook::x86::Hooker::new(
+            0x428330,
+            HookType::JmpToEnumRet(skiponcehost_ret, skiponcehost),
+            0,
+        )
+        .hook(5)
+    };
     std::mem::forget(new);
 
+    let skiponceclient_ret = vec![0x4286c3, 0x428630, 0x428605];
     unsafe extern "cdecl" fn skiponceclient(
         a: *mut ilhook::x86::Registers,
         _b: usize,
@@ -1733,7 +1789,7 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
     ) -> usize {
         if ESC > 120 {
             //old mechanism
-            0x4286c3
+            0
         } else {
             //let skip = DISABLE_SEND.load(Relaxed) != 0;
             //DISABLE_SEND.store(1, Relaxed);
@@ -1741,11 +1797,11 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
             let skip = true;
 
             if skip {
-                0x428630
+                1
             } else {
                 (*a).ecx = *ptr_wrap!(((*a).edi + 0x8) as *const u32);
                 (*a).eax = *ptr_wrap!(((*a).ecx) as *const u32);
-                0x428605
+                2
             }
         }
     }
@@ -1766,7 +1822,12 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
     //not sure why client has two "esc" spaces but I'm not going to question it
 
     let new = unsafe {
-        ilhook::x86::Hooker::new(0x428600, HookType::JmpToRet(skiponceclient), 0).hook(5)
+        ilhook::x86::Hooker::new(
+            0x428600,
+            HookType::JmpToEnumRet(skiponceclient_ret, skiponceclient),
+            0,
+        )
+        .hook(5)
     };
     std::mem::forget(new);
 
@@ -1823,7 +1884,7 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
                 *target = cur + (target_frametime) as u128;
             } else {
             }
-            WARNING_FRAME_LOST_COUNTDOWN.store(120, Relaxed);
+            WARNING_FRAME_LOST_COUNTDOWN.store(115, Relaxed);
         } else {
             WaitForSingleObject(HANDLE(waithandle as isize), ddiff as u32);
             if SPIN_TIME_MICROSECOND != 0 {
@@ -1839,7 +1900,10 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
                 if let Some(event) = *event
                     && WaitForSingleObject(HANDLE(event), 0).0 == 0
                 {
-                    WARNING_FRAME_LOST_COUNTDOWN.store(120, Relaxed);
+                    println!("frame costed too much time!");
+                    WARNING_FRAME_LOST_COUNTDOWN.store(115, Relaxed);
+                } else if WARNING_FRAME_LOST_COUNTDOWN.load(Relaxed) != 0 {
+                    WARNING_FRAME_LOST_COUNTDOWN.fetch_sub(1, Relaxed);
                 }
             }
         };
@@ -1995,10 +2059,12 @@ fn truer_exec(filename: PathBuf, pretend_to_be_vanilla: bool) -> Result<(), Stri
         })
     };
 
-    let new = unsafe {
-        ilhook::x86::Hooker::new(0x00482689, HookType::JmpToRet(is_replay_over), 0).hook(5)
-    };
-    std::mem::forget(new);
+    unsafe {
+        tamper_jmp_relative_opr(
+            0x00482689 as *mut c_void,
+            is_replay_over as unsafe extern "fastcall" fn(_) -> _,
+        );
+    }
 
     Ok(())
 }
@@ -2023,7 +2089,7 @@ pub extern "cdecl" fn cleanup() {
         .for_each(|x| unsafe { x.unhook() });
 }
 
-unsafe fn set_input_buffer(input: [bool; 10], input2: [bool; 10]) {
+unsafe fn set_input_buffer(input: [bool; INPUT_KEYS_NUMBERS], input2: [bool; INPUT_KEYS_NUMBERS]) {
     REAL_INPUT = Some(input);
     REAL_INPUT2 = Some(input2);
 }
@@ -2045,6 +2111,27 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 #[cfg(feature = "fillfree")]
 static mut HEAP_FREE_RNG: Option<rand::rngs::ThreadRng> = None;
 
+#[cfg(feature = "fillfree")]
+unsafe fn fill_random(addr: usize, size: Option<usize>) {
+    use crate::rollback::read_heap;
+    let size = size.or_else(|| Some(read_heap(addr))).unwrap();
+    let a = std::slice::from_raw_parts_mut(addr as *mut u8, size);
+    use rand::{thread_rng, Rng};
+    if HEAP_FREE_RNG.is_none() {
+        HEAP_FREE_RNG = Some(thread_rng());
+    }
+    let rng = HEAP_FREE_RNG.as_mut().unwrap();
+    for byte in a {
+        // (3/4)^4 is approximately equal to 0.32.
+        // The possibility that a specific int32_t will be filled zero will be approximately equal to 0.32.
+        if rng.gen_ratio(3, 4) {
+            *byte = 0;
+        } else {
+            *byte = rng.gen();
+        }
+    }
+}
+
 #[macro_export]
 macro_rules! soku_heap_free {
     ($ptr:expr) => {{
@@ -2055,15 +2142,8 @@ macro_rules! soku_heap_free {
         let a: usize = $ptr;
         #[cfg(feature = "fillfree")]
         {
-            use crate::rollback::read_heap;
-            let size = read_heap(a);
-            let a = std::slice::from_raw_parts_mut(a as *mut u8, size);
-            use crate::HEAP_FREE_RNG;
-            use rand::{thread_rng, Rng};
-            if HEAP_FREE_RNG.is_none() {
-                HEAP_FREE_RNG = Some(thread_rng());
-            }
-            HEAP_FREE_RNG.as_mut().unwrap().fill(a);
+            use crate::fill_random;
+            fill_random(a, None);
         }
         HeapFree(
             HANDLE(*(0x89b404 as *const isize)),
@@ -2158,6 +2238,10 @@ unsafe extern "stdcall" fn heap_alloc_override(heap: isize, flags: u32, s: usize
         //println!("wrong heap alloc");
     } else {
         assert_ne!(ret, null_mut(), "HeapAlloc failed for {:?}", GetLastError());
+        #[cfg(feature = "fillfree")]
+        if flags & HEAP_ZERO_MEMORY.0 == 0 {
+            fill_random(ret as usize, Some(s));
+        }
         store_alloc(ret as usize);
     }
     return ret;
@@ -2575,9 +2659,9 @@ static DISABLE_SEND: AtomicU8 = AtomicU8::new(0);
 
 //todo: improve rewind mechanism
 
-fn input_to_accum(inp: &[bool; 10]) -> u16 {
+fn input_to_accum(inp: &[bool; INPUT_KEYS_NUMBERS]) -> u16 {
     let mut inputaccum = 0u16;
-    for a in 0..10 {
+    for a in 0..INPUT_KEYS_NUMBERS {
         if inp[a] {
             inputaccum += 0x1 << a;
         }
@@ -2591,17 +2675,17 @@ unsafe fn read_key_better(key: u8) -> bool {
     *((raw_input_buffer + key as u32) as *const u8) != 0
 }
 
-unsafe fn read_current_input() -> [bool; 10] {
+unsafe fn read_current_input() -> [bool; INPUT_KEYS_NUMBERS] {
     let local_input_manager = 0x898938;
     let raw_input_buffer = 0x8a01b8;
-    let mut input = [false; 10];
+    let mut input = [false; INPUT_KEYS_NUMBERS];
 
     let controller_id = *((local_input_manager + 0x4) as *const u8);
     //if 255, then keyboard, if 0, or maybe something else, then controller
 
     if controller_id == 255 {
         //no controllers, reading keyboard input
-        for a in 0..10 {
+        for a in 0..INPUT_KEYS_NUMBERS {
             let key = (local_input_manager + 0x8 + a * 0x4) as *const u8;
 
             let key = *key as u32;
@@ -2624,7 +2708,7 @@ unsafe fn read_current_input() -> [bool; 10] {
             input[0] = axis2 < -500;
             input[1] = axis2 > 500;
 
-            for a in 0..6 {
+            for a in 0..(INPUT_KEYS_NUMBERS - 4) {
                 let key = *ptr_wrap!((local_input_manager + 0x18 + a * 0x4) as *const i32);
 
                 if key > -1 {
@@ -2950,6 +3034,11 @@ unsafe extern "cdecl" fn main_hook(a: *mut ilhook::x86::Registers, _b: usize) {
         }
     } else {
         //IS_KO = false;
+    }
+
+    if cur_speed_iter + 1 >= cur_speed {
+        WARNING_FRAME_MISSING_1_COUNTDOWN = WARNING_FRAME_MISSING_1_COUNTDOWN.saturating_sub(1);
+        WARNING_FRAME_MISSING_2_COUNTDOWN = WARNING_FRAME_MISSING_2_COUNTDOWN.saturating_sub(1);
     }
 
     let battle_manaer = (*a).esi as *const *const u8;

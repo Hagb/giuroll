@@ -1,12 +1,12 @@
 use crate::{
     change_delay_from_keys, draw_num, draw_num_x_center, get_num_length, pause, println, ptr_wrap,
     read_current_input, read_key_better, resume,
-    rollback::{self, dump_frame, Frame, DUMP_FRAME_TIME},
+    rollback::{dump_frame, Frame, DUMP_FRAME_TIME},
     soku_heap_free, CENTER_X_P1, CENTER_X_P2, CENTER_Y_P1, CENTER_Y_P2, DISABLE_SOUND,
-    ENABLE_CHECK_MODE, F32, INSIDE_COLOR, INSIDE_HALF_HEIGHT, INSIDE_HALF_WIDTH,
-    LAST_DELAY_VALUE_TAKEOVER, MEMORY_RECEIVER_ALLOC, MEMORY_RECEIVER_FREE, NEXT_DRAW_ROLLBACK,
-    OUTER_COLOR, OUTER_HALF_HEIGHT, OUTER_HALF_WIDTH, PROGRESS_COLOR, REAL_INPUT, REAL_INPUT2,
-    SMOOTH, SMOOTH_ENABLED_CONFIG, SOKU_FRAMECOUNT, TAKEOVER_COLOR,
+    ENABLE_CHECK_MODE, F32, INPUT_KEYS_NUMBERS, INSIDE_COLOR, INSIDE_HALF_HEIGHT,
+    INSIDE_HALF_WIDTH, LAST_DELAY_VALUE_TAKEOVER, MEMORY_RECEIVER_ALLOC, MEMORY_RECEIVER_FREE,
+    NEXT_DRAW_ROLLBACK, OUTER_COLOR, OUTER_HALF_HEIGHT, OUTER_HALF_WIDTH, PROGRESS_COLOR,
+    REAL_INPUT, REAL_INPUT2, SMOOTH, SMOOTH_ENABLED_CONFIG, SOKU_FRAMECOUNT, TAKEOVER_COLOR,
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -25,8 +25,8 @@ use windows::Win32::System::Console::AllocConsole;
 
 struct RePlayRePlay {
     frame: usize,
-    p1_inputs: HashMap<usize, [bool; 10]>,
-    p2_inputs: HashMap<usize, [bool; 10]>,
+    p1_inputs: HashMap<usize, [bool; INPUT_KEYS_NUMBERS]>,
+    p2_inputs: HashMap<usize, [bool; INPUT_KEYS_NUMBERS]>,
     last_input_frame: Option<usize>,
     is_p2: bool,
 }
@@ -78,7 +78,7 @@ impl RePlayRePlay {
             REAL_INPUT = if self.p1_inputs.get(&fc).is_none()
                 && REPLAY_KO_FRAMECOUNT == Some(*SOKU_FRAMECOUNT)
             {
-                Some([false; 10])
+                Some([false; INPUT_KEYS_NUMBERS])
             } else {
                 self.p1_inputs.get(&fc).copied()
             };
@@ -209,22 +209,18 @@ pub unsafe fn render_replay_progress_bar_and_numbers() {
     return;
 }
 
-pub unsafe extern "cdecl" fn is_replay_over(
-    a: *mut ilhook::x86::Registers,
-    _b: usize,
-    _c: usize,
-) -> usize {
+pub unsafe extern "fastcall" fn is_replay_over(this: usize) -> bool {
     // https://stackoverflow.com/a/46134764
-    let ori_fun: unsafe extern "fastcall" fn(u32) -> bool =
+    let ori_fun: unsafe extern "fastcall" fn(usize) -> bool =
         unsafe { std::mem::transmute(0x00480860) };
-    (*a).eax = (ori_fun((*a).ecx) && RE_PLAY.is_none() && CHECK.is_none()) as u32;
+    let ret = ori_fun(this) && RE_PLAY.is_none() && CHECK.is_none();
     // A workaround for removing the single (p1 only) extra input at the end of replays with KO
     // Check whether the deque saving inputs has only one element (size == 1):
     if *ptr_wrap!((*(0x0089881c as *const *const u32)).offset(0x4c / 4)) == 1 {
         // When the replay is over at this frame because of KO
         REPLAY_KO_FRAMECOUNT = Some(*SOKU_FRAMECOUNT);
     }
-    return 0x00482689 + 5;
+    return ret;
 }
 
 pub unsafe fn clean_replay_statics() {
@@ -243,7 +239,8 @@ pub unsafe fn clean_replay_statics() {
         set_keys_availability_in_takeover(true);
     }
     NEXT_DRAW_ROLLBACK = None;
-    PERFORMANCE_TEST = None
+    PERFORMANCE_TEST = None;
+    DISABLE_SOUND = false;
 }
 
 unsafe fn set_keys_availability_in_takeover(enable: bool) {
@@ -550,14 +547,14 @@ pub unsafe fn handle_replay(
 
     resume(battle_state);
 
-    unsafe fn get_input(is_p2: bool) -> [bool; 10] {
+    unsafe fn get_input(is_p2: bool) -> [bool; INPUT_KEYS_NUMBERS] {
         let p_battle_manager = *(0x008985E4 as *const *const u8);
         let player_addr: *const u8 = match is_p2 {
             true => *(p_battle_manager.offset(0x10) as *const _),
             false => *(p_battle_manager.offset(0xc) as *const _),
         };
         let addr: *const i32 = player_addr.offset(0x754) as *const i32;
-        let mut ret = [false; 10];
+        let mut ret = [false; INPUT_KEYS_NUMBERS];
         (ret[0], ret[1]) = (*addr.offset(1) < 0, *addr.offset(1) > 0);
         (ret[2], ret[3]) = (*addr.offset(0) < 0, *addr.offset(0) > 0);
         for i in 2..8 {

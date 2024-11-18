@@ -3,7 +3,7 @@ cargo-features = ["profile-rustflags"]
 name = "giuroll"
 authors = ["Giufin (2023~2024)", "Hagb (Junyu Guo) <hagb@hagb.name> (2024)"]
 license = "MIT"
-version = "0.6.17-2-hagb"
+version = "0.6.17-5-beta2-hagb"
 edition = "2021"
 build = "build.rs"
 description = "A network rollback mod for 東方非想天則 / Touhou 12.3 Hisoutensoku, with also support for replay rewind and takeover"
@@ -47,7 +47,11 @@ rand =  { version = "0.8.5", optional = true }
 
 [profile.release]
 strip = true
-#rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[profile.dev]
+rustflags = ["-C", "target-feature=+crt-static"]
+
 
 [package.metadata.winres]
 OriginalFilename = "giuroll.dll"

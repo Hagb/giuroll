@@ -16,11 +16,11 @@ use windows::Win32::Foundation::HANDLE;
 use crate::println;
 use crate::{
     ptr_wrap, set_input_buffer, soku_heap_free, Callbacks, CameraTransform, CALLBACK_ARRAY,
-    ISDEBUG, LAST_CAMERA_BEFORE_SMOOTH, MEMORY_RECEIVER_ALLOC, MEMORY_RECEIVER_FREE,
-    SOKU_FRAMECOUNT, SOUND_MANAGER,
+    INPUT_KEYS_NUMBERS, ISDEBUG, LAST_CAMERA_BEFORE_SMOOTH, MEMORY_RECEIVER_ALLOC,
+    MEMORY_RECEIVER_FREE, SOKU_FRAMECOUNT, SOUND_MANAGER,
 };
 
-type RInput = [bool; 10];
+type RInput = [bool; INPUT_KEYS_NUMBERS];
 
 pub static mut CHARSIZEDATA: Vec<(usize, usize)> = vec![];
 
@@ -74,14 +74,14 @@ impl EnemyInputHolder {
     fn get_result(&self, frame: usize) -> Result<RInput, RInput> {
         match self.i.get(frame) {
             Some(Some(x)) => Ok(*x),
-            None if frame == 0 => Err([false; 10]),
+            None if frame == 0 => Err([false; INPUT_KEYS_NUMBERS]),
             Some(None) | None => {
                 /*
                     in the future maybe try dropping inputs for attacks that are about to charge?
                     let mut w = (1..3)
                         .map(|x| self.get(frame.saturating_sub(x)))
                         .reduce(|x, y| {
-                            (0..10)
+                            (0..INPUT_KEYS_NUMBERS)
                                 .map(|idx| x[idx] & y[idx])
                                 .collect::<Vec<_>>()
                                 .try_into()
@@ -199,7 +199,7 @@ impl Rollbacker {
                     .flatten()
                     .collect::<HashSet<_>>();
 
-                for idx in (self.current).saturating_sub(10)..=(self.current + 1) {
+                for idx in (self.current).saturating_sub(INPUT_KEYS_NUMBERS)..=(self.current + 1) {
                     if new_sounds.contains_key(&(self.current + 1)) {
                         println!("HERE, CONTAINS")
                     }
@@ -436,7 +436,7 @@ pub unsafe fn dump_frame(
     if ISDEBUG {
         info!("0x8985e8")
     };
-    let read_weird_structure = |m: &mut Vec<_>, pos: usize, size: usize| {
+    unsafe fn read_weird_structure(m: &mut Vec<ReadAddr>, pos: usize, size: usize) {
         //I'm not quite sure what's going on here, or if it's infact correct
         let dat = read_addr(pos, 0x14);
         let n = dat.usize_align();
@@ -462,7 +462,7 @@ pub unsafe fn dump_frame(
 
             m.push(read_addr(addr, size));
         }
-    };
+    }
 
     let ptr1 = read_addr(0x8985e8, 0x4);
     let first = get_ptr(&ptr1.content[0..4], 0);
@@ -485,24 +485,24 @@ pub unsafe fn dump_frame(
         info!("0x8985e4")
     };
 
-    let ptr1 = read_addr(0x8985e4, 0x4);
-    let first = get_ptr(&ptr1.content[0..4], 0);
-    m.push(read_addr(first, 0x908));
-    m.extend(read_linked_list(first + 0x30).read_all(0));
-    m.extend(read_linked_list(first + 0x3c).read_all(0));
-    m.extend(read_linked_list(first + 0x48).read_all(0));
-    m.extend(read_linked_list(first + 0x54).read_all(0));
-    m.extend(read_linked_list(first + 0x60).read_all(0));
-    m.extend(read_linked_list(first + 0x6c).read_all(0));
+    let p_battle_manager = read_addr(0x8985e4, 0x4);
+    let p_battle_manager = get_ptr(&p_battle_manager.content[0..4], 0);
+    m.push(read_addr(p_battle_manager, 0x908));
+    m.extend(read_linked_list(p_battle_manager + 0x30).read_all(0));
+    m.extend(read_linked_list(p_battle_manager + 0x3c).read_all(0));
+    m.extend(read_linked_list(p_battle_manager + 0x48).read_all(0));
+    m.extend(read_linked_list(p_battle_manager + 0x54).read_all(0));
+    m.extend(read_linked_list(p_battle_manager + 0x60).read_all(0));
+    m.extend(read_linked_list(p_battle_manager + 0x6c).read_all(0));
 
     {
-        let w = read_vec(first + 0x9c);
+        let w = read_vec(p_battle_manager + 0x9c);
         if w.start != 0 {
             m.push(w.read_underlying());
             #[cfg(feature = "logtofile")]
             info!("battle+x9c wasn't 0");
         }
-        let w = read_vec(first + 0xac);
+        let w = read_vec(p_battle_manager + 0xac);
 
         if w.start != 0 {
             m.push(w.read_underlying());
@@ -511,21 +511,15 @@ pub unsafe fn dump_frame(
             info!("battle+xac wasn't 0");
         }
     }
-    m.extend(read_linked_list(first + 0xbc).read_all(0));
+    m.extend(read_linked_list(p_battle_manager + 0xbc).read_all(0));
 
-    m.extend(read_linked_list(first + 0xe8).read_all(0));
+    m.extend(read_linked_list(p_battle_manager + 0xe8).read_all(0));
 
     //0x8985dc
     if ISDEBUG {
         #[cfg(feature = "logtofile")]
         info!("0x8985dc")
     };
-
-    let ptr1 = read_addr(0x8985dc, 0x4);
-    let first = get_ptr(&ptr1.content[0..4], 0);
-
-    m.push(read_addr(first, 0x58));
-    m.push(read_vec(first + 0x40).read_underlying());
 
     //0x8986a0
     #[cfg(feature = "logtofile")]
@@ -548,7 +542,7 @@ pub unsafe fn dump_frame(
         info!("0x8985e4")
     };
 
-    let read_character_data = |p: usize, offset: usize, m: &mut Vec<_>| {
+    unsafe fn read_player_data(player: usize, m: &mut Vec<ReadAddr>) {
         let read_bullets = |pos: usize, char: u8, m: &mut Vec<_>| {
             let list = read_linked_list(pos);
 
@@ -560,7 +554,7 @@ pub unsafe fn dump_frame(
                 m.push(a.to_addr());
                 let d = a.additional_data;
                 if d != 0 {
-                    let z = CHARSIZEDATA[char as usize % CHARSIZEDATA.len()].1;
+                    let z = CHARSIZEDATA[char as usize].1;
                     let bullet = read_addr(d, z);
                     let p1 = get_ptr(&bullet.content, 0x3a4);
 
@@ -631,21 +625,34 @@ pub unsafe fn dump_frame(
             }
         };
 
-        let old = *ptr_wrap!((p + 0xc + offset * 4) as *const usize);
-        let char = old + 0x34c;
+        let char = player + 0x34c;
         let char = *(char as *const u8);
 
-        let cdat = read_addr(old, CHARSIZEDATA[char as usize % CHARSIZEDATA.len()].0);
+        let cdat = read_addr(player, CHARSIZEDATA[char as usize].0);
 
-        let bullets = old + 0x17c;
+        let bullets = player + 0x17c;
         read_bullets(bullets, char, m);
 
         if char == 5 {
             //youmu
-            read_weird_structure(m, old + 0x8bc, 0x2c);
+            read_weird_structure(m, player + 0x8bc, 0x2c);
         }
 
-        let ll = read_linked_list(old + 0x718);
+        if char == 0x37 {
+            // Mamizou of CharacterEngine (https://github.com/SokuDev/CharacterEngine).
+            // Hardcoding it is just a temporary workaround.
+            // TODO: it should be exposed with APIs and implemented by developers of characters mods.
+            // More specific:
+            // - Comments. renaming, and even refactoring (for self-documenting code) to figure what they are exactly (mostly for myself to write APIs clearly);
+            // - APIs for developers to ask GR to save/restore an address as a specific data structure, mostly Player, List, Vector, GameObject, String, and sized array;
+            // - C++ header for these APIs.
+            let extra_char = get_ptr(&cdat.content, 0x890);
+            if extra_char != 0 {
+                read_player_data(extra_char, m);
+            }
+        }
+
+        let ll = read_linked_list(player + 0x718);
 
         m.push(read_addr(ll.ll4, 0xf4));
 
@@ -691,26 +698,46 @@ pub unsafe fn dump_frame(
 
         read_bullets(new + 0x5c, char, m);
 
-        let p8 = read_maybe_ring_buffer(old + 0x7b0);
+        let p8 = read_maybe_ring_buffer(player + 0x7b0);
         m.extend(p8.read_whole(0x10));
 
-        let p9 = read_maybe_ring_buffer(old + 0x5e8);
+        let p9 = read_maybe_ring_buffer(player + 0x5e8);
         m.extend(p9.read_whole(0x98));
 
-        let p10 = read_maybe_ring_buffer(old + 0x5b0);
+        let p10 = read_maybe_ring_buffer(player + 0x5b0);
         m.extend(p10.read_whole(0x10));
 
-        let p11 = read_maybe_ring_buffer(old + 0x5fc);
+        let p11 = read_maybe_ring_buffer(player + 0x5fc);
         m.extend(p11.read_whole(0x10));
+    }
+
+    let get_player = |p_game_manager: usize, offset: usize| {
+        assert!(offset < 4);
+        if *((p_game_manager + 0x38 + offset) as *const u8) != 0 {
+            Some(*((p_game_manager + 0x28 + offset * 4) as *const usize))
+        } else {
+            None
+        }
     };
 
-    let i3 = read_addr(0x8985e4, 4);
+    let p_game_manager = read_addr(0x8985dc, 0x4);
+    let p_game_manager = get_ptr(&p_game_manager.content[0..4], 0);
 
-    let p3 = get_ptr(&i3.content, 0);
+    m.push(read_addr(p_game_manager, 0x58));
+    m.push(read_vec(p_game_manager + 0x40).read_underlying());
 
-    read_character_data(p3, 0, &mut m);
+    let p1 = get_player(p_game_manager, 0).unwrap();
+    read_player_data(p1, &mut m);
 
-    read_character_data(p3, 1, &mut m);
+    let p2 = get_player(p_game_manager, 1).unwrap();
+    read_player_data(p2, &mut m);
+
+    // dumping characters (players) data for 2v2 mod
+    get_player(p_game_manager, 2).and_then(|p| Some(read_player_data(p, &mut m)));
+    get_player(p_game_manager, 3).and_then(|p| Some(read_player_data(p, &mut m)));
+
+    assert_eq!(*((p_battle_manager + 0xc + 0 * 4) as *const usize), p1);
+    assert_eq!(*((p_battle_manager + 0xc + 1 * 4) as *const usize), p2);
 
     #[cfg(feature = "logtofile")]
     if ISDEBUG {
@@ -926,7 +953,7 @@ impl LL3Holder {
             info!("ll4 is 0 ,painc");
             panic!("ll4 is 0");
         }
-        let c = || {
+        let c = #[coroutine] || {
             let last = read_ll4(self.ll4);
             let mut last_next = last.next;
             yield last;
@@ -956,7 +983,7 @@ impl LL3Holder {
 
     fn read_all<'a>(&'a self, additional_size: usize) -> impl Iterator<Item = ReadAddr> + 'a {
         //I think that readLL3 does not read itself, however, I will leave this here because it cannot hurt
-        let c = move || {
+        let c = #[coroutine] move || {
             yield self.to_addr();
             if self.listcount == 0 {
                 yield read_ll4(self.ll4).to_addr();
